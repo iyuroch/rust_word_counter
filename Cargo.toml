@@ -1,0 +1,9 @@
+[package]
+name = "word_counter"
+version = "0.1.0"
+authors = ["iyuroch <iyuroch@gmail.com>"]
+
+[dependencies]
+serde = "1.0.66"
+serde_derive = "1.0.66"
+serde_json = "1.0.20"
