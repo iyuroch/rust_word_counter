@@ -3,8 +3,6 @@ extern crate spmc;
 extern crate serde;
 extern crate serde_json;
 
-use std::borrow::Cow;
-use std::io::BufRead;
 use std::str::Chars;
 use std::sync::{Arc, Mutex};
 use std::fs::File;
@@ -35,31 +33,39 @@ fn read_config() -> Config {
     return config;
 }
 
-fn read_file_char(s: &str, tx: spmc::Sender<Arc<Vec<Arc<String>>>>) -> std::io::Result<()> {
+fn read_file_char(s: &str, tx: spmc::Sender<Box<Vec<String>>>) -> std::io::Result<()> {
     let mut file = File::open(s)?;
     let mut f = BufReader::new(file);
 
     let ignore_chars: Vec<String> = vec!["\'", "\"", ",", ".", ";"].iter().map(|&s| s.into()).collect();
 
     let mut _words_counter = 0;
-    //let mut words_vec = Box::new(Vec::new());
-    
-    //let mut word: String = "".to_string();
+    let mut words_vec = Box::new(Vec::new());
+    let mut word: String = "".to_string();
 
+    tx.send(Box::new(vec!["Yeaah".to_string()]));
 
-    let mut exam = Box::new("hi".to_string());
-    //tx.send(Arc::new(vec!(Box::leak(exam))));
+    for ch_ptr in f.chars() {
+        let ch: String = ch_ptr.unwrap().to_string();
 
-    let mut words_vec = Arc::new(Vec::new());
+        if word.len() == 0 && ignore_chars.contains(&ch) {
+            println!("Ignoring");
+            continue;
+        } else if ch == " " || ch == "\n" {
+            tx.send(Box::new(vec![word.to_owned()]));
+            word.clear();
+        } else {
+            word.push_str(&ch);
+        }
+        
+        if _words_counter == 100 {
+            _words_counter = 0;
+            tx.send(words_vec);
+            let mut words_vec: Vec<String>;
+        }
 
-    for ch_vec in f.split(b' ') {
-        let mut owned_vec = ch_vec.unwrap().to_owned();
-        let mut word = Arc::new(String::from(String::from_utf8_lossy(&owned_vec)));
-        println!("{}", *word);
-        words_vec.push(Arc::clone(&word.clone()));
-        let send = Arc::clone(&words_vec);
-        tx.send(send);
     }
+    println!("{}", word); 
     //println!("Char: {:?}", count);
     drop(tx);
     Ok(())
