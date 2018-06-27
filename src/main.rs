@@ -6,9 +6,6 @@ extern crate rayon;
 
 #[macro_use]
 extern crate serde_derive;
-extern crate chan;
-
-use chan::{Receiver, Sender};
 
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
@@ -17,7 +14,7 @@ use std::thread;
 use std::io::{Read, BufReader};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
-
+use std::collections::VecDeque;
 //TODO: add condvar to wake up threads
 
 #[derive(Serialize, Deserialize)]
@@ -57,12 +54,11 @@ fn read_file_char(s: &str, tx: spmc::Sender<Arc<Mutex<Vec<Arc<Vec<u8>>>>>>) -> s
     }
 
     tx.send(words_vec.clone()).expect("Cannot send word to channel");
-
     drop(tx);
     Ok(())
 }
 
-fn count_words(vec_rx: spmc::Receiver<Arc<Mutex<Vec<Arc<Vec<u8>>>>>>, dict_tx: chan::Sender<Arc<Mutex<HashMap<Arc<Vec<u8>>, u32>>>>) {
+fn count_words(vec_rx: spmc::Receiver<Arc<Mutex<Vec<Arc<Vec<u8>>>>>>, dict_queue: Arc<Mutex<VecDeque<Arc<Mutex<HashMap<Arc<Vec<u8>>,u32>>>>>>) {
     let mut occurrences = Arc::new(Mutex::new(HashMap::new()));
     'outer: loop {
         let words = vec_rx.try_recv();
@@ -72,44 +68,56 @@ fn count_words(vec_rx: spmc::Receiver<Arc<Mutex<Vec<Arc<Vec<u8>>>>>>, dict_tx: c
                     *occurrences.lock().unwrap().entry(word.clone()).or_insert(0) += 1;
                 }
             }
-            Err(spmc::TryRecvError::Empty) => continue,
+            Err(spmc::TryRecvError::Empty) => continue 'outer,
             Err(spmc::TryRecvError::Disconnected) => break 'outer,
         }
     }
+    dict_queue.lock().unwrap().push_back(occurrences.clone());
+    VEC_COUNT_JOBS.fetch_sub(1, Ordering::SeqCst);
 }
 
-fn collect_dict(dict_tx: chan::Receiver<Arc<Mutex<HashMap<Arc<Vec<u8>>, u32>>>>) {
+fn collect_dict(dict_queue: Arc<Mutex<VecDeque<Arc<Mutex<HashMap<Arc<Vec<u8>>,u32>>>>>>) {
     //TODO: mark them and if already have one - wake up this
+    let mut first_map;
+    let mut second_map;
+    //DICT_NUM
+    //VEC_COUNT_JOBS.fetch_add(1, Ordering::SeqCst);
+    println!("{}", dict_queue.lock().unwrap().len());
     'outer: loop {
-        let first_map = dict_tx.recv();
-        let second_map = dict_tx.recv();
+        if dict_queue.lock().unwrap().len() == 1 && VEC_COUNT_JOBS.load(Ordering::SeqCst) == 0 {
+            break 'outer
+        } else {
+            let mut queue = dict_queue.lock().unwrap();
+            first_map = queue.pop_front();
+            second_map = queue.pop_front();
+        }
     }
+    println!("done");
 }
 
 fn main() {
     let config: Config = read_config();
 
     let (vec_tx, vec_rx) = spmc::channel::<Arc<Mutex<Vec<Arc<Vec<u8>>>>>>();
-    let (dict_tx, dict_rx) = chan::sync::<Arc<Mutex<HashMap<Arc<Vec<u8>>, u32>>>>(0);
+    //let (dict_tx, dict_rx) = chan::sync::<Arc<Mutex<HashMap<Arc<Vec<u8>>, u32>>>>(0);
 
-    //let mut thread_pool = Vec::new();
+    let dict_queue = Arc::new(Mutex::new(VecDeque::new()));
 
-    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(8).build().unwrap();
+    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
 
     for _ in 0..2 {
         let vec_rx = vec_rx.clone();
-        let dict_tx = dict_tx.clone();
+        let dict_queue = dict_queue.clone();
         VEC_COUNT_JOBS.fetch_add(1, Ordering::SeqCst);
-        thread_pool.install(move || count_words(vec_rx, dict_tx));
-//        thread_pool.push(thread::spawn(move || count_words(vec_rx, dict_tx) ));
+        thread_pool.spawn(move || count_words(vec_rx, dict_queue));
     }
-    
+
     read_file_char(&config.read_file, vec_tx).expect("Cannot read file char by char");
 
-    println!("{}", config.read_file);
+    //println!("{}", config.read_file);
    
     for _ in 0..1 {
-        let dict_rx = dict_rx.clone();
-        let sum_dict = thread_pool.install(move || collect_dict(dict_rx));
+        let dict_queue = dict_queue.clone();
+        thread_pool.spawn(move || collect_dict(dict_queue));
     }
 }
