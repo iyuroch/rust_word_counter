@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
 use std::collections::VecDeque;
 use std::str;
 //TODO: add condvar to wake up threads
+//TODO: we don't need the sender - as we operate with pointers and lock anyway
 
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -43,7 +44,7 @@ fn read_file_char(s: &str, tx: spmc::Sender<Arc<Mutex<Vec<Arc<Vec<u8>>>>>>) -> s
 
     for ch_vec in f.split(b' ') {
         let word = Arc::new(ch_vec.unwrap().to_owned());
-        
+         
         if words_vec.lock().unwrap().len() == 100 {
             tx.send(words_vec.clone()).expect("Cannot send word to channel");
             words_vec = Arc::new(Mutex::new(vec![]));
@@ -79,27 +80,26 @@ fn collect_dict(dict_queue: Arc<Mutex<VecDeque<Arc<Mutex<HashMap<Arc<Vec<u8>>,u3
     //TODO: test which map is bigger
     let mut first_map = Arc::new(Mutex::new(HashMap::new()));
     let mut second_map = Arc::new(Mutex::new(HashMap::new()));
-    let mut dict_queue_len;
     'outer: loop {
         {
-            dict_queue_len = dict_queue.lock().unwrap().len();
-        }
-        if dict_queue_len < 2 && VEC_COUNT_JOBS.load(Ordering::SeqCst) == 0 {
-            break 'outer
-        } else {
-            //check for condvar wake up
-            //test if enough length - if not continue outer
-            if dict_queue_len > 1 {
-                println!("working here");
-                let mut queue = dict_queue.lock().unwrap();
-                first_map = Arc::clone(&queue.pop_front().unwrap());
-                second_map = Arc::clone(&queue.pop_front().unwrap());
+            let mut queue = dict_queue.lock().unwrap();
+            if queue.len() < 2 && VEC_COUNT_JOBS.load(Ordering::SeqCst) == 0 {
+                break 'outer
+            } else {
+                //check for condvar wake up
+                //test if enough length - if not continue outer
+                println!("NOO");
+                if queue.len() > 1 {
+                    first_map = Arc::clone(&queue.pop_front().unwrap());
+                    second_map = Arc::clone(&queue.pop_front().unwrap());
+                    drop(queue);
+                    for (key, value) in first_map.lock().unwrap().iter_mut() {
+                        let mut prim_map = second_map.lock().unwrap(); 
+                        let mut counter = *prim_map.entry(key.clone()).or_insert(*value);
+                        counter += *value;
+                    }
+                }
             }
-        }
-        for (key, value) in first_map.lock().unwrap().iter_mut() {
-            let mut prim_map = second_map.lock().unwrap(); 
-            let mut counter = *prim_map.entry(key.clone()).or_insert(*value);
-            counter += *value;
         }
         dict_queue.lock().unwrap().push_back(second_map.clone());
     }
@@ -109,7 +109,7 @@ fn collect_dict(dict_queue: Arc<Mutex<VecDeque<Arc<Mutex<HashMap<Arc<Vec<u8>>,u3
 fn main() {
     let (vec_tx, vec_rx) = spmc::channel::<Arc<Mutex<Vec<Arc<Vec<u8>>>>>>();
     let dict_queue = Arc::new(Mutex::new(VecDeque::new()));
-    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(3).build().unwrap();
     let config: Config = read_config();
 
     let words_vec_alarm = Condvar::new();
@@ -130,8 +130,9 @@ fn main() {
     }
 
     let first_map = Arc::clone(&dict_queue.lock().unwrap().pop_front().unwrap());
+
     for (key, value) in first_map.lock().unwrap().iter_mut() {
         let sparkle_heart = str::from_utf8(&key).unwrap();
-        println!("{}, {}", sparkle_heart, value);
+ //       println!("{}, {}", sparkle_heart, value);
     }
 }
