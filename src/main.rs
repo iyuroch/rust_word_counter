@@ -12,7 +12,7 @@ extern crate serde_derive;
 use std::io::BufRead;
 use std::sync::{Arc, Mutex};
 use std::fs::File;
-use std::io::{Read, BufReader};
+use std::io::{Read, BufReader, Write};
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::str;
@@ -20,10 +20,13 @@ use std::str;
 //TODO: add exception handling for the file read
 //TODO: no fastest way to clear string from chars - need to fix this
 //TODO: test which map is bigger and iterate over smaller - will save time
+//TODO: reimplement checking of empty words to somewhere else
+//TODO: not clear constant config files
 
 #[derive(Serialize, Deserialize)]
 struct Config {
-    threads: u16,
+    count_threads: u16,
+    merge_threads: u16,
     read_file: String,
     alph_count: String,
     nume_count: String,
@@ -90,7 +93,8 @@ fn count_words(vec_rx: spmc::Receiver<Box<Vec<Box<Vec<u8>>>>>,
 }
 
 fn collect_dict(dict_queue: Arc<Mutex<VecDeque<Box<HashMap<String,u32>>>>>,
-                wake_rx: crossbeam_channel::Receiver<bool>) {
+                wake_rx: crossbeam_channel::Receiver<bool>,
+                finish_tx: crossbeam_channel::Sender<bool>) {
     let mut first_map;
     let mut second_map;
     let mut finish_reading = false;
@@ -116,23 +120,41 @@ fn collect_dict(dict_queue: Arc<Mutex<VecDeque<Box<HashMap<String,u32>>>>>,
                 }
                 dict_queue.lock().unwrap().push_back(second_map);
             } else if queue.len() == 1 && finish_reading {
+                finish_tx.send(true);
                 break 'outer;
             }
         }
     }
 }
 
+fn write_vec_tuple(tuple_vec: &Vec<(&String, &u32)>, filename: &String) {
+    let mut out_file = File::create(filename)
+                        .expect("Unable to open file to write");
+    for el in tuple_vec.iter() {
+        if el.0 != "" {
+            out_file.write_fmt(format_args!("{}:{}\n", el.0, el.1))
+                        .expect("Can't write to file");
+        }
+    }
+}
+
 fn main() {
+    // vec_* -> send pointers to vectors from reader to counters
+    // wake_* -> wake up mergers as we parsed vector
+    // finish_* -> let know main thread that we finished merging
     let (vec_tx, vec_rx) = spmc::channel::<Box<Vec<Box<Vec<u8>>>>>();
     let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
+    let (finish_tx, finish_rx) = crossbeam_channel::unbounded();
 
+    // we need to be able to recieve at once 2 dictionary
+    // that's why vecdeque
     let dict_queue = Arc::new(Mutex::new(VecDeque::new()));
     let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(3)
                         .build().unwrap();
 
     let config: Config = read_config();
 
-    for _ in 0..1 {
+    for _ in 0..config.count_threads {
         let vec_rx = vec_rx.clone();
         let wake_tx = wake_tx.clone();
         let dict_queue = dict_queue.clone();
@@ -146,21 +168,26 @@ fn main() {
     read_file_char(&config.read_file, vec_tx)
         .expect("Cannot read file char by char");
    
-    for _ in 0..1 {
+    for _ in 0..config.merge_threads {
         let dict_queue = dict_queue.clone();
         let wake_rx = wake_rx.clone();
+        let finish_tx = finish_tx.clone();
 
-        let _n = thread_pool.install(move || collect_dict(dict_queue, wake_rx));
+        thread_pool.spawn(move || collect_dict(dict_queue, 
+                                                wake_rx, finish_tx));
     }
+
+    // block until finished merging all maps
+    finish_rx.recv();
 
     let res_dict = dict_queue.lock().unwrap().pop_front();
     match res_dict {
         Some(v) => {
             let mut count_vec: Vec<(&String, &u32)> = v.iter().collect();
             count_vec.sort_by(|a, b| b.1.cmp(a.1));
-            println!("{:?}", count_vec);
+            write_vec_tuple(&count_vec, &config.nume_count);
             count_vec.sort_by(|a, b| a.0.cmp(b.0));
-            println!("{:?}", count_vec);
+            write_vec_tuple(&count_vec, &config.alph_count);
         },
         None => (),
     }
