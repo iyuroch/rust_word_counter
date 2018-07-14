@@ -119,7 +119,7 @@ fn collect_dict(dict_queue: Arc<Mutex<VecDeque<Box<HashMap<String,u32>>>>>,
             //if all sender closed - return none
             wake_rx.recv();
             match wake_rx.recv() {
-                Some(v) => println!("{}", v),
+                Some(_) => (),
                 None => finish_reading = true,
             };
             // we need to check before starting merging - if no words counter
@@ -130,7 +130,7 @@ fn collect_dict(dict_queue: Arc<Mutex<VecDeque<Box<HashMap<String,u32>>>>>,
                 second_map = queue.pop_front().unwrap();
                 drop(queue);
                 for (key, value) in first_map.iter_mut() {
-                    *second_map.entry(key.to_string()).or_insert(*value) += 1;
+                    *second_map.entry(key.to_string()).or_insert(0) += *value;
                     continue;
                 }
                 dict_queue.lock().unwrap().push_back(second_map);
@@ -191,8 +191,15 @@ fn main() {
                                                 wake_rx, finish_tx));
     }
 
+    drop(finish_tx);
+
     // block until finished merging all maps
-    finish_rx.recv();
+    loop  {
+        match finish_rx.recv() {
+            Some(_) => continue,
+            None => break,
+        }
+    }
     drop(thread_pool);
 
     let res_dict = dict_queue.lock().unwrap().pop_front();
