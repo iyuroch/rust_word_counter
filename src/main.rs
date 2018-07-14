@@ -25,15 +25,16 @@ use std::str;
 
 #[derive(Serialize, Deserialize)]
 struct Config {
-    count_threads: u16,
-    merge_threads: u16,
+    threads: usize,
+    count_jobs: u16,
+    merge_jobs: u16,
     read_file: String,
     alph_count: String,
     nume_count: String,
 }
 
 fn read_config() -> Config {
-    let mut file = File::open("config.json").unwrap();
+    let mut file = File::open("config.json").expect("Cannot find config file");
     let mut data = String::new();
     file.read_to_string(&mut data).unwrap();
     let config: Config = serde_json::from_str(&mut data)
@@ -66,6 +67,20 @@ fn count_words(vec_rx: spmc::Receiver<Box<Vec<Box<Vec<u8>>>>>,
                 dict_queue: Arc<Mutex<VecDeque<Box<HashMap<String,u32>>>>>,
                 wake_tx: crossbeam_channel::Sender<bool>) {
     let mut occurrences = Box::new(HashMap::new());
+    let patterns : &[_] = &[    '\"', '\'', '+', '-',
+                                '(', ')', '.', '_', '*',
+                                '#', '/', '%', '^', '˙', '´',
+                                '─', '-', ';', ' ', '—', 
+                                ',', '"', '′', '″', '˝', '…', '\\',
+                                '┼', '┬', '┴', '†', '°', '–',
+                                '┤', '┘', '└', '┌', '┐', '├',
+                                '$', '&', '[', ']', '│', '|',
+                                '”', '“', '’', '‘', '„', '!', '=',
+                                '-', '∴', ':' , '?', '{', '}',
+                                'ᵇ', 'ᵈ', 'ᵐ', 'ᶜ', 'ʰ', 'ª',
+                                '«', '»',
+                                '1', '2', '3', '4', '5',
+                                '6', '7', '8', '9', '0'];
     'outer: loop {
         let words = vec_rx.recv();
         match words {
@@ -76,8 +91,8 @@ fn count_words(vec_rx: spmc::Receiver<Box<Vec<Box<Vec<u8>>>>>,
                     // also not sure if split by \n here
                     let mut raw_words = String::from(str::from_utf8(&char_vec).unwrap());
                     for raw_word in raw_words.split("\n") {
-                        let word = raw_word.trim_matches(|c| c == ',' || c == '.' 
-                                        || c == ';' || c == ' ').to_lowercase();
+                        let word = raw_word.trim_matches(patterns)
+                                        .to_lowercase();
                         *occurrences.entry(word).or_insert(0) += 1;
                     }
 
@@ -119,7 +134,7 @@ fn collect_dict(dict_queue: Arc<Mutex<VecDeque<Box<HashMap<String,u32>>>>>,
                     continue;
                 }
                 dict_queue.lock().unwrap().push_back(second_map);
-            } else if queue.len() == 1 && finish_reading {
+            } else if queue.len() <= 1 && finish_reading {
                 finish_tx.send(true);
                 break 'outer;
             }
@@ -149,12 +164,11 @@ fn main() {
     // we need to be able to recieve at once 2 dictionary
     // that's why vecdeque
     let dict_queue = Arc::new(Mutex::new(VecDeque::new()));
-    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(3)
+    let config: Config = read_config();
+    let thread_pool = rayon::ThreadPoolBuilder::new().num_threads(config.threads)
                         .build().unwrap();
 
-    let config: Config = read_config();
-
-    for _ in 0..config.count_threads {
+    for _ in 0..config.count_jobs {
         let vec_rx = vec_rx.clone();
         let wake_tx = wake_tx.clone();
         let dict_queue = dict_queue.clone();
@@ -168,7 +182,7 @@ fn main() {
     read_file_char(&config.read_file, vec_tx)
         .expect("Cannot read file char by char");
    
-    for _ in 0..config.merge_threads {
+    for _ in 0..config.merge_jobs {
         let dict_queue = dict_queue.clone();
         let wake_rx = wake_rx.clone();
         let finish_tx = finish_tx.clone();
@@ -179,6 +193,7 @@ fn main() {
 
     // block until finished merging all maps
     finish_rx.recv();
+    drop(thread_pool);
 
     let res_dict = dict_queue.lock().unwrap().pop_front();
     match res_dict {

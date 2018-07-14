@@ -1,7 +1,8 @@
 {
     "read_file": "book.txt",
-    "count_threads": 1,
-    "merge_threads": 1,
+    "threads": 1,
+    "count_jobs": 1,
+    "merge_jobs": 1,
     "alph_count": "alph_count.txt",
     "nume_count": "nume_count.txt"
 }
